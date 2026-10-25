@@ -1,0 +1,17 @@
+body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 960px; padding: 1rem; color: #111; }
+header h1 { margin-bottom: 0; }
+.sub, .note { color: #555; }
+.keybar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+.keybar input[type=password] { width: 22rem; max-width: 90vw; }
+.error { background: #fdecea; border: 1px solid #e57373; padding: .5rem; margin: 1rem 0; white-space: pre-wrap; }
+.card { border: 1px solid #ccc; border-radius: 6px; padding: .75rem; margin: .5rem 0; }
+.card h3, .card h4 { margin: .25rem 0; }
+button { cursor: pointer; }
+table { border-collapse: collapse; width: 100%; }
+td, th { border: 1px solid #ddd; padding: .35rem .5rem; text-align: left; }
+.badge { display: inline-block; padding: 0 .4rem; border-radius: 4px; background: #eee; }
+.badge.add { background: #d7f0d7; }
+.badge.change { background: #fff3cd; }
+.badge.destroy, .badge.delete { background: #f8d7da; }
+.actions { display: flex; gap: .5rem; flex-wrap: wrap; margin: 1rem 0; }
+.actions input { flex: 1; min-width: 16rem; }

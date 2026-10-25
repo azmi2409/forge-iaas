@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>forge-iaas dashboard</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>forge-iaas</h1>
+  <p class="sub">Agent-ready Terraform control plane — plans never apply themselves. Approval needs an apply-scoped key.</p>
+  <div class="keybar">
+    <label>Agent key (fiak_…): <input id="key" type="password" placeholder="fiak_…" autocomplete="off"></label>
+    <button id="saveKey">Save key (browser only)</button>
+    <button id="clearKey">Forget key</button>
+    <span id="keyState"></span>
+  </div>
+  <p class="note">The key is stored only in this browser's localStorage and sent as a Bearer token to this server's API. State views here are redacted (types/names/addresses only) — never raw values.</p>
+</header>
+<main>
+  <nav>
+    <button id="navWorkspaces">Workspaces</button>
+    <button id="navAudit">Audit log</button>
+  </nav>
+  <section id="error" class="error" hidden></section>
+  <section id="workspacesView">
+    <h2>Workspaces</h2>
+    <div id="workspaces">Loading…</div>
+  </section>
+  <section id="workspaceView" hidden>
+    <button id="backToWorkspaces">← All workspaces</button>
+    <h2 id="wsTitle"></h2>
+    <div id="wsMeta"></div>
+    <h3>Runs</h3>
+    <div id="runs"></div>
+    <h3>State versions (redacted only)</h3>
+    <div id="stateVersions"></div>
+    <h3>Current state (redacted)</h3>
+    <div id="stateCurrent"></div>
+  </section>
+  <section id="runView" hidden>
+    <button id="backToWorkspace">← Workspace</button>
+    <h2 id="runTitle"></h2>
+    <div id="runMeta"></div>
+    <div class="actions">
+      <button id="approveBtn">Approve (needs apply-scoped key)</button>
+      <input id="overrideNote" type="text" placeholder="Override note (required when policy is advisory)">
+      <button id="discardBtn">Discard</button>
+    </div>
+    <h3>Plan diff</h3>
+    <div id="planDiff"></div>
+  </section>
+  <section id="auditView" hidden>
+    <h2>Audit log</h2>
+    <div id="audit"></div>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
