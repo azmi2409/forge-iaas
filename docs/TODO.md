@@ -1,9 +1,9 @@
 # TODO — forge-iaas MVP (8 components)
 
-Status 2026-10-24: MVP BUILT locally (all 8 components), unit tests
-green, CLI E2E with the mock engine green through state version 2 +
-drift clean + plan-key 403. NOT pushed to GitHub, NOT announced
-(shelved rule — push is a separate approval).
+Status 2026-10-25: MVP BUILT (all 8 components), unit tests green,
+CLI E2E with the mock engine green through state version 2 + drift
+clean + plan-key 403. PUSHED to github.com/azmi2409/forge-iaas
+2026-10-25 (public, NOT announced — shelved rule still stands).
 
 - [x] 0. REA: Terraform + Terraform Cloud feature inventory, OpenTofu
       fork analysis, TACOS pattern, agent-ready differentiation
@@ -41,8 +41,8 @@ drift clean + plan-key 403. NOT pushed to GitHub, NOT announced
       CLI + MCP E2E (mock) green, security checks green (see
       below). OPEN: (a) real-`tofu` E2E — no `tofu` binary on this
       machine, tofu engine returns a loud error instead of a fake
-      plan; (b) CI green + push — push NOT done, awaiting the
-      user's separate approval. MCP stdio note: the first scripted
+      plan; (b) CI workflow added 2026-10-25 and pushed with the
+      MVP (CI run on GitHub pending at push time). MCP stdio note: the first scripted
       MCP run only *appeared* to hang — the probe script waited
       for a reply to `notifications/initialized`, which by
       protocol never gets one. Fixed in `scripts/e2e-mock.sh`

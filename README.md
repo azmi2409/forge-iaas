@@ -131,8 +131,8 @@ are green, and the mock-engine E2E (`scripts/e2e-mock.sh`) passes:
 workspace → plan → approve → apply → state v2 → MCP drift clean,
 with a plan-scoped key correctly rejected (403) on approve.
 
-NOT pushed to GitHub and NOT announced — push is a separate
-approval. Real-OpenTofu E2E is still open: no `tofu` binary exists
+Pushed to GitHub 2026-10-25 (public, NOT announced — shelved rule
+still stands). Real-OpenTofu E2E is still open: no `tofu` binary exists
 on the build machine, so the tofu engine fails loudly instead of
 fabricating a plan; no real cloud account is required for sign-off.
 
