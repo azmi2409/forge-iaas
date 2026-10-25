@@ -46,7 +46,7 @@ output "x" { value = "hi" }
 	eng := NewMockEngine()
 	ws := testWorkspace(dir)
 
-	plan, err := eng.Plan(ctx, ws, nil)
+	plan, err := eng.Plan(ctx, ws, model.EngineVars{})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
@@ -62,7 +62,7 @@ output "x" { value = "hi" }
 		t.Fatalf("plan RawPlanJSON does not contain mock marker: %s", plan.RawPlanJSON)
 	}
 
-	state, err := eng.Apply(ctx, ws, plan, nil)
+	state, err := eng.Apply(ctx, ws, plan, model.EngineVars{})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -85,7 +85,7 @@ output "x" { value = "hi" }
 	}
 
 	// Second plan against the applied state: everything is a no-op.
-	plan2, err := eng.PlanWithState(ctx, ws, nil, state)
+	plan2, err := eng.PlanWithState(ctx, ws, model.EngineVars{}, state)
 	if err != nil {
 		t.Fatalf("PlanWithState: %v", err)
 	}
@@ -98,7 +98,7 @@ output "x" { value = "hi" }
 		}
 	}
 
-	empty, err := eng.Destroy(ctx, ws, nil)
+	empty, err := eng.Destroy(ctx, ws, model.EngineVars{})
 	if err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
@@ -122,7 +122,7 @@ locals {
 }
 resource "aws_instance" "real" {}
 `)
-	plan, err := NewMockEngine().Plan(ctx, testWorkspace(dir), nil)
+	plan, err := NewMockEngine().Plan(ctx, testWorkspace(dir), model.EngineVars{})
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
@@ -132,7 +132,7 @@ resource "aws_instance" "real" {}
 }
 
 func TestMockMissingDirErrorsLoudly(t *testing.T) {
-	_, err := NewMockEngine().Plan(context.Background(), testWorkspace("/nonexistent-dir-xyz"), nil)
+	_, err := NewMockEngine().Plan(context.Background(), testWorkspace("/nonexistent-dir-xyz"), model.EngineVars{})
 	if err == nil {
 		t.Fatal("expected error for missing config dir, got nil")
 	}
@@ -155,13 +155,13 @@ func TestTofuMissingBinaryLoudError(t *testing.T) {
 	writeTF(t, dir, "main.tf", `resource "aws_instance" "web" {}`)
 	eng := NewTofuEngine("fiaas-definitely-missing-binary-xyz")
 	ws := testWorkspace(dir)
-	if _, err := eng.Plan(ctx, ws, nil); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := eng.Plan(ctx, ws, model.EngineVars{}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Plan with missing binary: err = %v, want loud 'not found' error", err)
 	}
-	if _, err := eng.Apply(ctx, ws, nil, nil); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := eng.Apply(ctx, ws, nil, model.EngineVars{}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Apply with missing binary: err = %v, want loud 'not found' error", err)
 	}
-	if _, err := eng.Destroy(ctx, ws, nil); err == nil || !strings.Contains(err.Error(), "not found") {
+	if _, err := eng.Destroy(ctx, ws, model.EngineVars{}); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Destroy with missing binary: err = %v, want loud 'not found' error", err)
 	}
 }
@@ -170,8 +170,70 @@ func TestTofuDefaultBinaryMissingSkipsWhenPresent(t *testing.T) {
 	if _, err := exec.LookPath("tofu"); err == nil {
 		t.Skip("tofu binary present; missing-binary case covered by TestTofuMissingBinaryLoudError")
 	}
-	_, err := NewTofuEngine("tofu").Plan(context.Background(), testWorkspace(t.TempDir()), nil)
+	_, err := NewTofuEngine("tofu").Plan(context.Background(), testWorkspace(t.TempDir()), model.EngineVars{})
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("Plan with default tofu binary absent: err = %v, want loud 'not found' error", err)
+	}
+}
+
+func TestBuildEnvAWSProvider(t *testing.T) {
+	// Ambient server credentials must NOT leak into a run, and a
+	// workspace's own credentials must override them when set.
+	t.Setenv("AWS_ACCESS_KEY_ID", "AMBIENT-KEY")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "AMBIENT-SECRET")
+	t.Setenv("AWS_REGION", "us-east-1")
+	t.Setenv("AWS_CA_BUNDLE", "/ca/bundle.pem")
+	t.Setenv("MY_UNRELATED", "keep-me")
+
+	envMap := func(env []string) map[string]string {
+		m := map[string]string{}
+		for _, e := range env {
+			k, v, _ := strings.Cut(e, "=")
+			m[k] = v
+		}
+		return m
+	}
+
+	// Case 1: workspace sets its own AWS env vars -> they win,
+	// terraform vars become TF_VAR_*, unrelated env is inherited.
+	got := envMap(buildEnv(model.EngineVars{
+		Terraform: map[string]string{"aws_region": "ap-southeast-1"},
+		Env:       map[string]string{"AWS_ACCESS_KEY_ID": "WS-KEY", "AWS_SECRET_ACCESS_KEY": "WS-SECRET", "AWS_REGION": "ap-southeast-1"},
+	}))
+	if got["AWS_ACCESS_KEY_ID"] != "WS-KEY" || got["AWS_SECRET_ACCESS_KEY"] != "WS-SECRET" || got["AWS_REGION"] != "ap-southeast-1" {
+		t.Fatalf("workspace AWS env not passed verbatim: %v", got)
+	}
+	if got["TF_VAR_aws_region"] != "ap-southeast-1" {
+		t.Fatalf("terraform var not TF_VAR_-prefixed: %v", got)
+	}
+	if got["TF_VAR_AWS_ACCESS_KEY_ID"] != "" {
+		t.Fatalf("AWS credential leaked into TF_VAR_*: %v", got)
+	}
+	if got["MY_UNRELATED"] != "keep-me" {
+		t.Fatalf("unrelated inherited env dropped: %v", got)
+	}
+
+	// Case 2: workspace sets NO AWS vars -> ambient AWS keys are
+	// stripped, so the provider fails loudly instead of silently
+	// running on the server's credentials.
+	got2 := envMap(buildEnv(model.EngineVars{
+		Terraform: map[string]string{"bucket_name": "b"},
+	}))
+	if _, ok := got2["AWS_ACCESS_KEY_ID"]; ok {
+		t.Fatalf("ambient AWS_ACCESS_KEY_ID leaked into run env")
+	}
+	if _, ok := got2["AWS_SECRET_ACCESS_KEY"]; ok {
+		t.Fatalf("ambient AWS_SECRET_ACCESS_KEY leaked into run env")
+	}
+	if _, ok := got2["AWS_REGION"]; ok {
+		t.Fatalf("ambient AWS_REGION leaked into run env")
+	}
+	if got2["TF_VAR_bucket_name"] != "b" {
+		t.Fatalf("terraform var missing in stripped case: %v", got2)
+	}
+	// CA bundle is TLS trust, not account identity: it passes
+	// through even when the workspace sets no AWS credentials.
+	if got2["AWS_CA_BUNDLE"] != "/ca/bundle.pem" {
+		t.Fatalf("AWS_CA_BUNDLE should pass through, got %v", got2)
 	}
 }

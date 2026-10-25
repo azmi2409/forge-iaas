@@ -87,13 +87,22 @@ busy_timeout 5000.
 
 ```
 type Engine interface {
-  Plan(ctx, ws *model.Workspace, vars map[string]string) (*model.PlanSummary, error)
-  Apply(ctx, ws *model.Workspace, plan *model.PlanSummary, vars map[string]string) (newState []byte, err error)
-  Destroy(ctx, ws *model.Workspace, vars map[string]string) (newState []byte, err error)
+  Plan(ctx, ws *model.Workspace, vars model.EngineVars) (*model.PlanSummary, error)
+  Apply(ctx, ws *model.Workspace, plan *model.PlanSummary, vars model.EngineVars) (newState []byte, err error)
+  Destroy(ctx, ws *model.Workspace, vars model.EngineVars) (newState []byte, err error)
 }
 NewMockEngine() Engine  // parses .tf files for `resource "TYPE" "NAME"` lines only; NEVER touches real clouds; every output/log says "MOCK ENGINE — no real infrastructure"
 NewTofuEngine(bin string) Engine // execs `tofu init` + `tofu plan -json` (parse resource_changes) + `tofu apply -auto-approve` / destroy; if bin missing, Plan/Apply return a loud error, never a fake success
 ```
+
+Variables are partitioned (model.EngineVars, since the 2026-10-25
+AWS fix): Terraform variables -> TF_VAR_<key>; env variables ->
+verbatim process environment. The AWS provider is the reason: it
+reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION from
+env, not from TF_VAR_*. Ambient AWS keys in the server process
+environment are stripped unless the workspace sets them explicitly,
+so a run can never silently use the server's credentials. See
+examples/aws-basic/ for the working AWS workspace.
 
 Mock plan: each resource block = 1 create (if no prior state) else
 no-op; mock apply: state JSON version 4 with those resources and

@@ -19,6 +19,7 @@ import (
 type fakeVar struct {
 	plain     string
 	sensitive bool
+	category  string // "" means terraform (legacy behaviour)
 }
 
 type fakeStore struct {
@@ -199,7 +200,7 @@ func (f *fakeStore) ListVariables(wsID string) ([]*model.Variable, error) {
 		if v.sensitive {
 			display = "***"
 		}
-		out = append(out, &model.Variable{WorkspaceID: wsID, Key: k, DisplayValue: display, Sensitive: v.sensitive})
+		out = append(out, &model.Variable{WorkspaceID: wsID, Key: k, DisplayValue: display, Sensitive: v.sensitive, Category: v.category})
 	}
 	return out, nil
 }
@@ -493,5 +494,42 @@ func TestRunnerRunOnceEmptyQueue(t *testing.T) {
 	r := New(newFakeStore(), engine.NewMockEngine(), fakePolicy{result: model.PolicyPass}, fakeCost{})
 	if err := r.RunOnce(context.Background()); err != nil {
 		t.Fatalf("empty queue RunOnce = %v, want nil", err)
+	}
+}
+
+func TestLoadVarsPartitionsEnvAndTerraform(t *testing.T) {
+	store := newFakeStore()
+	wsID := "ws-aws"
+	store.workspaces[wsID] = &model.Workspace{ID: wsID}
+	store.vars[wsID] = map[string]fakeVar{
+		// AWS provider credentials: env category, must reach tofu raw.
+		"AWS_ACCESS_KEY_ID":     {plain: "AKIDEXAMPLE", sensitive: true, category: "env"},
+		"AWS_SECRET_ACCESS_KEY": {plain: "secret-example", sensitive: true, category: "env"},
+		"AWS_REGION":            {plain: "ap-southeast-1", category: "env"},
+		// HCL inputs: terraform category, must become TF_VAR_*.
+		"aws_region":  {plain: "ap-southeast-1", category: "terraform"},
+		"bucket_name": {plain: "my-bucket", category: "terraform"},
+	}
+	r := New(store, engine.NewMockEngine(), fakePolicy{result: model.PolicyPass}, fakeCost{})
+	vars, secrets := r.loadVars(wsID)
+	if vars.Env["AWS_ACCESS_KEY_ID"] != "AKIDEXAMPLE" || vars.Env["AWS_REGION"] != "ap-southeast-1" {
+		t.Fatalf("Env partition = %+v, want AWS keys raw", vars.Env)
+	}
+	if vars.Terraform["aws_region"] != "ap-southeast-1" || vars.Terraform["bucket_name"] != "my-bucket" {
+		t.Fatalf("Terraform partition = %+v, want HCL inputs", vars.Terraform)
+	}
+	if vars.Terraform["AWS_ACCESS_KEY_ID"] != "" || vars.Env["aws_region"] != "" {
+		t.Fatalf("partitions leaked across categories: terraform=%+v env=%+v", vars.Terraform, vars.Env)
+	}
+	for _, want := range []string{"AKIDEXAMPLE", "secret-example"} {
+		found := false
+		for _, s := range secrets {
+			if s == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("secrets %v missing sensitive AWS value %q", secrets, want)
+		}
 	}
 }

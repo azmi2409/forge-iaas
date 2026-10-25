@@ -47,6 +47,35 @@ HashiCorp source was accessed, and no Terraform trademark is claimed.
   or unredacted state — the runner holds credentials; the agent gets
   a redacted plan diff.
 
+## AWS provider
+
+Supported, via the OpenTofu binary — `tofu init` downloads the
+`hashicorp/aws` provider from the registry, and forge-iaas never
+talks to AWS itself. Working example: [`examples/aws-basic/`](examples/aws-basic/README.md)
+(S3 bucket, `hashicorp/aws ~> 5.0`).
+
+The rule that matters: **credentials are env variables, region
+is (usually) a terraform variable.** Store `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` with category `env`
+(sensitive), and HCL inputs like `aws_region` / `bucket_name`
+with category `terraform` — the runner passes env variables
+verbatim to tofu and terraform variables as `TF_VAR_*`. Getting
+this backwards used to silently break AWS auth (credentials
+arrived as `TF_VAR_AWS_ACCESS_KEY_ID`, which the provider ignores).
+
+Ambient AWS credentials from the server process are stripped
+unless the workspace sets them, so a workspace with no AWS
+credentials fails loudly at plan time instead of silently running
+on the server's account.
+
+Verified 2026-10-25 with OpenTofu 1.13.2 and fake credentials
+(no real AWS account): `tofu init` installs `hashicorp/aws`
+v5.100.0, a forge-iaas plan with AWS env variables set reaches
+`awaiting_approval` with `add=1`, and the same plan with no AWS
+env variables fails with "No valid credential sources found".
+A real-account apply is still untested — that is the natural
+next verification step, on a machine with real credentials.
+
 ## Your first run via MCP
 
 Connect the MCP server (stdio: `fiaas mcp`; HTTP: `/mcp` on

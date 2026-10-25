@@ -77,7 +77,7 @@ func New(store Store, eng engine.Engine, policy PolicyEvaluator, cost CostEstima
 // planWithState is the duck-typed state-aware plan method offered by
 // the mock engine (and any engine that supports it).
 type planWithState interface {
-	PlanWithState(ctx context.Context, ws *model.Workspace, vars map[string]string, state []byte) (*model.PlanSummary, error)
+	PlanWithState(ctx context.Context, ws *model.Workspace, vars model.EngineVars, state []byte) (*model.PlanSummary, error)
 }
 
 func (r *Runner) log(runID string, secrets []string, format string, args ...any) {
@@ -104,29 +104,45 @@ func (r *Runner) failRun(run *model.Run, secrets []string, errMsg string) error 
 	return fmt.Errorf("run %s failed: %s", run.ID, errMsg)
 }
 
-// loadVars returns the workspace variables for the engine plus the
-// sensitive plaintexts (for log redaction only — never logged).
-// Variables are resolved via GetVariablePlaintext (runner-only);
-// ListVariables alone only yields masked display values.
-func (r *Runner) loadVars(wsID string) (map[string]string, []string) {
-	vars := map[string]string{}
+// loadVars returns the workspace variables for the engine,
+// partitioned by category, plus the sensitive plaintexts (for log
+// redaction only — never logged). Variables are resolved via
+// GetVariablePlaintext (runner-only); ListVariables alone only
+// yields masked display values.
+//
+// The partition is the AWS-provider fix: category "env" variables
+// (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION, …) go to
+// EngineVars.Env and reach tofu as raw environment, while
+// "terraform" variables (and legacy variables with no category)
+// become TF_VAR_* for HCL variable blocks. Flattening them, as the
+// runner previously did, silently broke every provider that
+// authenticates via environment.
+func (r *Runner) loadVars(wsID string) (model.EngineVars, []string) {
+	vars := model.EngineVars{Terraform: map[string]string{}, Env: map[string]string{}}
 	var secrets []string
 	list, err := r.store.ListVariables(wsID)
 	if err != nil {
 		return vars, secrets
 	}
+	put := func(v *model.Variable, plain string) {
+		if v.Category == "env" {
+			vars.Env[v.Key] = plain
+		} else {
+			vars.Terraform[v.Key] = plain
+		}
+		if v.Sensitive && plain != "" {
+			secrets = append(secrets, plain)
+		}
+	}
 	for _, v := range list {
 		if plain, found, err := r.store.GetVariablePlaintext(wsID, v.Key); err == nil && found {
-			vars[v.Key] = plain
-			if v.Sensitive && plain != "" {
-				secrets = append(secrets, plain)
-			}
+			put(v, plain)
 			continue
 		}
 		// Fall back to the display value only for non-sensitive
 		// variables; sensitive values never come from DisplayValue.
 		if !v.Sensitive && v.DisplayValue != "" && v.DisplayValue != "***" {
-			vars[v.Key] = v.DisplayValue
+			put(v, v.DisplayValue)
 		}
 	}
 	return vars, secrets
@@ -136,7 +152,7 @@ func (r *Runner) loadVars(wsID string) (map[string]string, []string) {
 // engine can report no-ops for resources already in state. A missing
 // or unreadable prior state is not fatal: it just means the plan
 // reports everything as new (first-plan rule).
-func (r *Runner) planFor(ctx context.Context, ws *model.Workspace, vars map[string]string, secrets []string, runID string) (*model.PlanSummary, error) {
+func (r *Runner) planFor(ctx context.Context, ws *model.Workspace, vars model.EngineVars, secrets []string, runID string) (*model.PlanSummary, error) {
 	if ps, ok := r.engine.(planWithState); ok {
 		var state []byte
 		if sv, err := r.store.LatestStateVersion(ws.ID); err == nil && sv != nil {

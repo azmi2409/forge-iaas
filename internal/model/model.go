@@ -104,6 +104,42 @@ type Variable struct {
 	Category     string `json:"category"` // "terraform" | "env"
 }
 
+// EngineVars is the variable set handed to an execution engine,
+// partitioned by category. This split is what makes cloud providers
+// work: a "terraform" variable becomes TF_VAR_<key> for HCL
+// `variable` blocks, while an "env" variable is passed through
+// verbatim as process environment — which is exactly how the AWS
+// provider discovers credentials and region (AWS_ACCESS_KEY_ID,
+// AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN, AWS_REGION /
+// AWS_DEFAULT_REGION). Before this type existed the runner flattened
+// everything into one map and the tofu engine TF_VAR_-prefixed all
+// of it, so an AWS credential stored as an env variable never
+// reached the provider at all.
+//
+// EngineVars is in-memory only and must never be serialized to
+// API/MCP/audit/log output: Env may hold raw credentials.
+type EngineVars struct {
+	Terraform map[string]string // -> TF_VAR_<key>
+	Env       map[string]string // -> <key> verbatim
+}
+
+// AllValues returns every variable value (both partitions), for log
+// and error redaction. Callers must treat the result as secret.
+func (v EngineVars) AllValues() []string {
+	out := make([]string, 0, len(v.Terraform)+len(v.Env))
+	for _, s := range v.Terraform {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	for _, s := range v.Env {
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 type VariableSet struct {
 	ID        string    `json:"id"`
 	OrgID     string    `json:"org_id"`

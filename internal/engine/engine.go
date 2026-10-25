@@ -33,10 +33,15 @@ import (
 )
 
 // Engine is the execution-engine interface (see docs/INTERFACES.md).
+// vars is partitioned (see model.EngineVars): Terraform variables
+// become TF_VAR_* and Env variables become raw process environment.
+// That partition is load-bearing for cloud providers — the AWS
+// provider reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+// AWS_REGION from the environment, not from TF_VAR_*.
 type Engine interface {
-	Plan(ctx context.Context, ws *model.Workspace, vars map[string]string) (*model.PlanSummary, error)
-	Apply(ctx context.Context, ws *model.Workspace, plan *model.PlanSummary, vars map[string]string) (newState []byte, err error)
-	Destroy(ctx context.Context, ws *model.Workspace, vars map[string]string) (newState []byte, err error)
+	Plan(ctx context.Context, ws *model.Workspace, vars model.EngineVars) (*model.PlanSummary, error)
+	Apply(ctx context.Context, ws *model.Workspace, plan *model.PlanSummary, vars model.EngineVars) (newState []byte, err error)
+	Destroy(ctx context.Context, ws *model.Workspace, vars model.EngineVars) (newState []byte, err error)
 }
 
 // MockMarker appears in every mock engine output/log string.
@@ -194,7 +199,7 @@ func mockPlanSummary(resources []mockResource, inState map[string]bool) *model.P
 
 // Plan reports every discovered resource as a create. This is the
 // first-plan rule: with no prior state, everything is new.
-func (m *MockEngine) Plan(ctx context.Context, ws *model.Workspace, vars map[string]string) (*model.PlanSummary, error) {
+func (m *MockEngine) Plan(ctx context.Context, ws *model.Workspace, vars model.EngineVars) (*model.PlanSummary, error) {
 	return m.PlanWithState(ctx, ws, vars, nil)
 }
 
@@ -202,7 +207,7 @@ func (m *MockEngine) Plan(ctx context.Context, ws *model.Workspace, vars map[str
 // already in the given state JSON are no-ops, new ones are creates.
 // It is not part of the Engine interface; the runner uses it when
 // the engine offers it (duck-typed).
-func (m *MockEngine) PlanWithState(ctx context.Context, ws *model.Workspace, vars map[string]string, state []byte) (*model.PlanSummary, error) {
+func (m *MockEngine) PlanWithState(ctx context.Context, ws *model.Workspace, vars model.EngineVars, state []byte) (*model.PlanSummary, error) {
 	_ = ctx
 	_ = vars // mock ignores variable values; they are never logged
 	resources, err := m.discover(ws)
@@ -242,7 +247,7 @@ func mockStateDoc(resources []mockResource) []byte {
 
 // Apply returns a version-4 state document with mock ids for every
 // discovered resource. It reflects the current config on disk.
-func (m *MockEngine) Apply(ctx context.Context, ws *model.Workspace, plan *model.PlanSummary, vars map[string]string) ([]byte, error) {
+func (m *MockEngine) Apply(ctx context.Context, ws *model.Workspace, plan *model.PlanSummary, vars model.EngineVars) ([]byte, error) {
 	_ = ctx
 	_ = plan // mock apply reflects current config, not the stale plan
 	_ = vars // never logged
@@ -254,7 +259,7 @@ func (m *MockEngine) Apply(ctx context.Context, ws *model.Workspace, plan *model
 }
 
 // Destroy returns an empty-resources state document.
-func (m *MockEngine) Destroy(ctx context.Context, ws *model.Workspace, vars map[string]string) ([]byte, error) {
+func (m *MockEngine) Destroy(ctx context.Context, ws *model.Workspace, vars model.EngineVars) ([]byte, error) {
 	_ = ctx
 	_ = vars // never logged
 	if _, err := m.discover(ws); err != nil {
@@ -308,28 +313,81 @@ func (t *TofuEngine) workDir(ws *model.Workspace) (string, error) {
 
 // secretValues returns variable values for redacting command output
 // before it is ever embedded in an error.
-func secretValues(vars map[string]string) []string {
-	out := make([]string, 0, len(vars))
-	for _, v := range vars {
-		if v != "" {
-			out = append(out, v)
-		}
-	}
-	return out
+func secretValues(vars model.EngineVars) []string {
+	return vars.AllValues()
 }
 
-// runTofu executes tofu in dir with TF_VAR_* env entries. Stdout and
-// stderr are captured; on failure the returned error carries the
-// redacted tail of the output, never variable values.
-func (t *TofuEngine) runTofu(ctx context.Context, dir string, vars map[string]string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, t.bin, args...)
-	cmd.Dir = dir
-	env := os.Environ()
+// awsEnvKeys are the environment keys the AWS provider (and the AWS
+// SDKs it uses) reads for credentials, region, and identity. They
+// are stripped from the inherited process environment unless the
+// workspace explicitly sets them as env variables: otherwise a
+// workspace with no AWS credentials would silently inherit the
+// server process's credentials, and a workspace's own credentials
+// could be shadowed by ambient ones. Stripping is what makes AWS
+// support deterministic per workspace — and auditable, since the
+// only credentials a run can see are the ones the workspace set.
+var awsEnvKeys = map[string]bool{
+	"AWS_ACCESS_KEY_ID": true, "AWS_SECRET_ACCESS_KEY": true,
+	"AWS_SESSION_TOKEN": true, "AWS_SECURITY_TOKEN": true,
+	"AWS_REGION": true, "AWS_DEFAULT_REGION": true,
+	"AWS_PROFILE": true, "AWS_CONFIG_FILE": true,
+	"AWS_SHARED_CREDENTIALS_FILE": true, "AWS_ROLE_ARN": true,
+	"AWS_ROLE_SESSION_NAME": true, "AWS_WEB_IDENTITY_TOKEN_FILE": true,
+	"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": true,
+	"AWS_CONTAINER_CREDENTIALS_FULL_URI":     true,
+	// NOTE: AWS_CA_BUNDLE is deliberately NOT stripped. It is TLS
+	// trust configuration (which CA bundle to verify AWS endpoints
+	// with, e.g. behind an egress proxy), not account identity —
+	// stripping it would break AWS access in proxied environments
+	// for workspaces that set their own credentials.
+}
+
+// buildEnv builds the subprocess environment for a tofu run:
+// inherited process env, minus any key the workspace overrides and
+// minus ambient AWS keys the workspace did not set, plus
+// TF_VAR_<key> for terraform variables and verbatim <key> for env
+// variables. Later entries win for any key that still duplicates.
+func buildEnv(vars model.EngineVars) []string {
+	overridden := map[string]bool{}
+	for k := range vars.Env {
+		overridden[k] = true
+	}
+	for k := range vars.Terraform {
+		overridden["TF_VAR_"+k] = true
+	}
+	var env []string
+	for _, e := range os.Environ() {
+		key, _, _ := strings.Cut(e, "=")
+		if overridden[key] {
+			continue
+		}
+		if awsEnvKeys[key] && vars.Env[key] == "" {
+			// Ambient AWS credential/region/profile: strip it.
+			// The workspace either sets it explicitly or the
+			// provider fails loudly with no credentials.
+			continue
+		}
+		env = append(env, e)
+	}
 	env = append(env, "CHECKPOINT_DISABLE=1", "TF_INPUT=0")
-	for k, v := range vars {
+	for k, v := range vars.Terraform {
 		env = append(env, "TF_VAR_"+k+"="+v)
 	}
-	cmd.Env = env
+	for k, v := range vars.Env {
+		env = append(env, k+"="+v)
+	}
+	return env
+}
+
+// runTofu executes tofu in dir with TF_VAR_* env entries for
+// terraform variables and verbatim env entries for env variables
+// (notably AWS_* for the AWS provider). Stdout and stderr are
+// captured; on failure the returned error carries the redacted
+// tail of the output, never variable values.
+func (t *TofuEngine) runTofu(ctx context.Context, dir string, vars model.EngineVars, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, t.bin, args...)
+	cmd.Dir = dir
+	cmd.Env = buildEnv(vars)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -344,7 +402,7 @@ func (t *TofuEngine) runTofu(ctx context.Context, dir string, vars map[string]st
 	return stdout.Bytes(), nil
 }
 
-func (t *TofuEngine) init(ctx context.Context, dir string, vars map[string]string) error {
+func (t *TofuEngine) init(ctx context.Context, dir string, vars model.EngineVars) error {
 	_, err := t.runTofu(ctx, dir, vars, "init", "-input=false")
 	if err != nil {
 		return fmt.Errorf("tofu engine: init failed — refusing to continue with a fabricated plan: %w", err)
@@ -354,7 +412,7 @@ func (t *TofuEngine) init(ctx context.Context, dir string, vars map[string]strin
 
 // Plan runs init, plan -json -out, then show -json to parse
 // resource_changes into a redacted PlanSummary.
-func (t *TofuEngine) Plan(ctx context.Context, ws *model.Workspace, vars map[string]string) (*model.PlanSummary, error) {
+func (t *TofuEngine) Plan(ctx context.Context, ws *model.Workspace, vars model.EngineVars) (*model.PlanSummary, error) {
 	if err := t.resolveBin(); err != nil {
 		return nil, err
 	}
@@ -455,7 +513,7 @@ func tofuAction(actions []string) string {
 // Apply runs init + apply -auto-approve and returns the state file
 // tofu wrote. If no state file exists afterwards, that is a loud
 // error, not an occasion to invent state.
-func (t *TofuEngine) Apply(ctx context.Context, ws *model.Workspace, plan *model.PlanSummary, vars map[string]string) ([]byte, error) {
+func (t *TofuEngine) Apply(ctx context.Context, ws *model.Workspace, plan *model.PlanSummary, vars model.EngineVars) ([]byte, error) {
 	_ = plan // tofu applies the config on disk, not the summary
 	if err := t.resolveBin(); err != nil {
 		return nil, err
@@ -481,7 +539,7 @@ func (t *TofuEngine) Apply(ctx context.Context, ws *model.Workspace, plan *model
 // file. If tofu wrote no state file (e.g. nothing ever existed),
 // the canonical empty version-4 state is returned and documented
 // here as the destroy outcome, not as invented infrastructure.
-func (t *TofuEngine) Destroy(ctx context.Context, ws *model.Workspace, vars map[string]string) ([]byte, error) {
+func (t *TofuEngine) Destroy(ctx context.Context, ws *model.Workspace, vars model.EngineVars) ([]byte, error) {
 	if err := t.resolveBin(); err != nil {
 		return nil, err
 	}
